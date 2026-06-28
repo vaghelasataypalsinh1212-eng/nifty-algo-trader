@@ -14,7 +14,6 @@ st.set_page_config(
 st.title("📈 NIFTY 50 Algo Backtest Engine")
 st.markdown("---")
 
-# ─── SIDEBAR CONTROLS ───────────────────────────────────────────
 st.sidebar.header("⚙️ Settings")
 
 capital = st.sidebar.number_input(
@@ -49,47 +48,37 @@ lookback_days = st.sidebar.selectbox(
 
 run_backtest = st.sidebar.button("🚀 Run Backtest", type="primary")
 
-# ─── DATA LAYER ──────────────────────────────────────────────────
 @st.cache_data(ttl=3600)
 def load_data(ticker, period_days, interval):
     end = datetime.today()
     start = end - timedelta(days=period_days)
-    df = yf.download(
-        ticker,
-        start=start.strftime("%Y-%m-%d"),
-        end=end.strftime("%Y-%m-%d"),
-        interval=interval,
-        progress=False,
-        auto_adjust=True
-    )
+    try:
+        df = yf.download(
+            ticker,
+            start=start.strftime("%Y-%m-%d"),
+            end=end.strftime("%Y-%m-%d"),
+            interval=interval,
+            progress=False,
+            auto_adjust=True,
+            timeout=30
+        )
+    except Exception:
+        return pd.DataFrame()
     if df.empty:
         return pd.DataFrame()
     df.dropna(inplace=True)
     df.index = pd.to_datetime(df.index)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
     return df
 
-# ─── STRATEGY LAYER (PLUG-IN) ────────────────────────────────────
 def apply_strategy(df):
-    """
-    Strategy plug-in zone.
-    Apni strategy yahan add karo.
-    Return karo df with 'signal' column:
-        1  = BUY
-       -1  = SELL
-        0  = NO TRADE
-    Aur 'sl' column = stop loss price
-    Aur 'tp' column = take profit price
-    """
     df = df.copy()
-
-    # Example placeholder — EMA crossover (replace with your strategy)
     df["ema_fast"] = df["Close"].ewm(span=9, adjust=False).mean()
     df["ema_slow"] = df["Close"].ewm(span=21, adjust=False).mean()
-
     df["signal"] = 0
     df.loc[df["ema_fast"] > df["ema_slow"], "signal"] = 1
     df.loc[df["ema_fast"] < df["ema_slow"], "signal"] = -1
-
     atr = df["High"] - df["Low"]
     df["sl"] = np.where(
         df["signal"] == 1,
@@ -103,12 +92,10 @@ def apply_strategy(df):
     )
     return df
 
-# ─── BACKTEST ENGINE ─────────────────────────────────────────────
 def run_backtest_engine(df, capital, risk_pct, daily_loss_pct, weekly_loss_pct):
     risk_amount = capital * (risk_pct / 100)
     daily_limit = capital * (daily_loss_pct / 100)
     weekly_limit = capital * (weekly_loss_pct / 100)
-
     trades = []
     equity = capital
     equity_curve = [capital]
@@ -125,7 +112,6 @@ def run_backtest_engine(df, capital, risk_pct, daily_loss_pct, weekly_loss_pct):
         if last_date != current_date:
             daily_loss = 0.0
             last_date = current_date
-
         if last_week != current_week:
             weekly_loss = 0.0
             last_week = current_week
@@ -142,11 +128,11 @@ def run_backtest_engine(df, capital, risk_pct, daily_loss_pct, weekly_loss_pct):
             equity_curve.append(equity)
             continue
 
-        entry = row["Close"]
-        sl = row["sl"]
-        tp = row["tp"]
-
+        entry = float(row["Close"])
+        sl = float(row["sl"])
+        tp = float(row["tp"])
         sl_distance = abs(entry - sl)
+
         if sl_distance == 0:
             equity_curve.append(equity)
             continue
@@ -156,11 +142,7 @@ def run_backtest_engine(df, capital, risk_pct, daily_loss_pct, weekly_loss_pct):
             equity_curve.append(equity)
             continue
 
-        if signal == 1:
-            pnl = (tp - entry) * qty
-        else:
-            pnl = (entry - tp) * qty
-
+        pnl = (tp - entry) * qty if signal == 1 else (entry - tp) * qty
         pnl = round(pnl, 2)
         equity += pnl
 
@@ -182,29 +164,23 @@ def run_backtest_engine(df, capital, risk_pct, daily_loss_pct, weekly_loss_pct):
 
     return trades, equity_curve
 
-# ─── METRICS CALCULATOR ──────────────────────────────────────────
 def calculate_metrics(trades, capital):
     if not trades:
         return {}
-
     df_t = pd.DataFrame(trades)
     total_trades = len(df_t)
     wins = df_t[df_t["pnl"] > 0]
     losses = df_t[df_t["pnl"] <= 0]
-
     win_rate = round((len(wins) / total_trades) * 100, 2)
     total_pnl = round(df_t["pnl"].sum(), 2)
     avg_win = round(wins["pnl"].mean(), 2) if len(wins) > 0 else 0
     avg_loss = round(losses["pnl"].mean(), 2) if len(losses) > 0 else 0
     expectancy = round((win_rate/100 * avg_win) + ((1 - win_rate/100) * avg_loss), 2)
-
     equity_vals = df_t["equity"].values
     peak = np.maximum.accumulate(equity_vals)
     drawdown = (equity_vals - peak) / peak * 100
     max_drawdown = round(drawdown.min(), 2)
-
     net_return = round(((df_t["equity"].iloc[-1] - capital) / capital) * 100, 2)
-
     return {
         "Total Trades": total_trades,
         "Win Rate (%)": win_rate,
@@ -216,7 +192,6 @@ def calculate_metrics(trades, capital):
         "Max Drawdown (%)": max_drawdown
     }
 
-# ─── MAIN UI ─────────────────────────────────────────────────────
 col1, col2 = st.columns([2, 1])
 
 with col1:
@@ -225,7 +200,7 @@ with col1:
         df_raw = load_data("^NSEI", lookback_days, timeframe)
 
     if df_raw.empty:
-        st.error("Data load nahi hua. Internet check karo ya timeframe badlo.")
+        st.error("Data load nahi hua. Thodi der baad try karo — Yahoo Finance ka rate limit hai.")
     else:
         fig = go.Figure(data=[go.Candlestick(
             x=df_raw.index,
@@ -269,8 +244,7 @@ if run_backtest:
         else:
             st.subheader("📈 Results")
             m_cols = st.columns(4)
-            metric_list = list(metrics.items())
-            for idx, (k, v) in enumerate(metric_list):
+            for idx, (k, v) in enumerate(metrics.items()):
                 with m_cols[idx % 4]:
                     st.metric(k, v)
 
@@ -293,7 +267,6 @@ if run_backtest:
             df_trades = pd.DataFrame(trades)
             df_trades["date"] = df_trades["date"].astype(str)
             st.dataframe(df_trades, use_container_width=True)
-
 else:
     st.info("⬅️ Left side mein settings karo aur 'Run Backtest' press karo.")
 
